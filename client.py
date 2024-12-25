@@ -405,7 +405,7 @@ def send_session_key(client_B_ip, client_B_port, session_key, to_B, id_B):
             acknowledgment = decrypt_session_message(encrypted_ack, session_key)
             print(f"Received acknowledgment from Client B: {acknowledgment}")
             if acknowledgment == "Correct solution!":
-                handle_messaging(conn, "sender", session_key)
+                handle_messaging(client_B_conn, "sender", session_key)
 
     except Exception as e:
         print(f"Error sending session key to Client B: {e}")
