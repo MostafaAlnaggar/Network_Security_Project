@@ -456,6 +456,9 @@ def communicate(conn, private_key_pem, session_keys):
                 except Exception as e:
                     print(f"Error during exit: {e}")
                 break
+            if command == "yes":
+                while True:
+                    pass
             else:
                 print("Unknown command. Available commands: session, send, rotate, revoke, exit")
         except KeyboardInterrupt:
