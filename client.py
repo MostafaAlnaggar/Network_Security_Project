@@ -419,10 +419,13 @@ def send_session_key(client_B_ip, client_B_port, session_key, to_B, id_B):
 
 flag = False
 
+
 def communicate(conn, private_key_pem, session_keys):
     """Handles user commands and interactions."""
     while True:
         try:
+            if flag:
+                continue
             command = input("Enter command (session/exit): ").strip().lower()
             if command == "session":
                 # After requesting session:
@@ -465,10 +468,6 @@ def communicate(conn, private_key_pem, session_keys):
                     print(f"Error during exit: {e}")
                 break
 
-            if command == "yes":
-                global flag
-                while flag:
-                    pass
             else:
                 print("Unknown command. Available commands: session, send, rotate, revoke, exit")
         except KeyboardInterrupt:
