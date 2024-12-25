@@ -21,6 +21,7 @@ closed = False
 def handle_messaging(peer_socket, peer_name, session_key):
     def receive_messages():
         global closed
+        global flag
         while True:
             try:
                 if closed:
@@ -31,6 +32,7 @@ def handle_messaging(peer_socket, peer_name, session_key):
                 if not decrypted_message or decrypted_message == ":q":
                     print(Fore.RED + f"{peer_name} has ended the chat.")
                     closed = True
+                    flag = False
                     break
                 print(f"{peer_name}: {decrypted_message}")
             except ConnectionResetError:
@@ -40,6 +42,7 @@ def handle_messaging(peer_socket, peer_name, session_key):
 
     def send_messages():
         global closed
+        global flag
         while True:
             try:
                 if closed:
@@ -49,6 +52,7 @@ def handle_messaging(peer_socket, peer_name, session_key):
                     closed = True
                     peer_socket.send(encrypt_session_message(user_input, session_key))
                     print("You have ended the chat.")
+                    flag = False
                     break
                 # Encrypt the message
                 encrypted_message = encrypt_session_message(user_input, session_key)
@@ -181,7 +185,9 @@ def listen_for_messages(sock):
         try:
             conn, addr = sock.accept()  # Accept incoming connections
             print(f"Connection established with {addr}")
-
+            print("Do you want to accept messages from this client(yes/no)")
+            global flag
+            flag = True
             while True:
                 # Step 1: Receive the fixed-size header
                 header = conn.recv(HEADER_SIZE).decode('utf-8').strip()
@@ -411,6 +417,8 @@ def send_session_key(client_B_ip, client_B_port, session_key, to_B, id_B):
         print(f"Error sending session key to Client B: {e}")
 
 
+flag = False
+
 def communicate(conn, private_key_pem, session_keys):
     """Handles user commands and interactions."""
     while True:
@@ -456,8 +464,10 @@ def communicate(conn, private_key_pem, session_keys):
                 except Exception as e:
                     print(f"Error during exit: {e}")
                 break
+
             if command == "yes":
-                while True:
+                global flag
+                while flag:
                     pass
             else:
                 print("Unknown command. Available commands: session, send, rotate, revoke, exit")
