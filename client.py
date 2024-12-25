@@ -3,570 +3,694 @@ import json
 import sys
 import threading
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes
 import socket
 from Crypto.Cipher import DES
 from Crypto.Util.Padding import pad, unpad
 from colorama import init, Fore
 
-client_socket = None
-
 # Initialize colorama
-init()
+init(autoreset=True)
 
-closed = False
+class ChatClient:
+    def __init__(self, server_host='127.0.0.1', server_port=12345):
+        self.server_host = server_host
+        self.server_port = server_port
+        self.conn = None  # SSL-wrapped socket
+        self.private_key_pem = ""
+        self.session_keys = {}  # Stores session keys with other users
+        self.running = True  # Flag to control the client loop
+        self.in_session = False  # Flag to indicate if in messaging mode
+        self.peer_socket = None  # Socket connected to the peer
+        self.peer_name = ""  # Name of the peer
+        self.receive_thread = None  # Thread for receiving messages
+        self.session_established = threading.Event()  # Event to signal session establishment
 
-
-def handle_messaging(peer_socket, peer_name, session_key):
-    def receive_messages():
-        global closed
-        global flag
-        while True:
-            try:
-                if closed:
-                    return
-                encrypted_message = peer_socket.recv(1024)
-                # Decrypt the message
-                decrypted_message = decrypt_session_message(encrypted_message, session_key)
-                if not decrypted_message or decrypted_message == ":q":
-                    print(Fore.RED + f"{peer_name} has ended the chat.")
-                    closed = True
-                    flag = False
-                    break
-                print(f"{peer_name}: {decrypted_message}")
-            except ConnectionResetError:
-                print(f"{peer_name} disconnected.")
-                break
-        peer_socket.close()
-
-    def send_messages():
-        global closed
-        global flag
-        while True:
-            try:
-                if closed:
-                    return
-                user_input = input(Fore.LIGHTBLUE_EX + "You: ")
-                if user_input == ":q":
-                    closed = True
-                    peer_socket.send(encrypt_session_message(user_input, session_key))
-                    print("You have ended the chat.")
-                    flag = False
-                    break
-                # Encrypt the message
-                encrypted_message = encrypt_session_message(user_input, session_key)
-                peer_socket.send(encrypted_message)
-            except ConnectionResetError:
-                print("Connection lost.")
-                break
-        peer_socket.close()
-
-    # Start threads for sending and receiving messages
-    receive_thread = threading.Thread(target=receive_messages)
-    send_thread = threading.Thread(target=send_messages)
-
-    receive_thread.start()
-    send_thread.start()
-
-    receive_thread.join()
-    send_thread.join()
-
-
-def encrypt_session_message(message, session_key):
-    # Ensure the key is 8 bytes long (DES uses 8-byte keys)
-    session_key = session_key.encode('utf-8').ljust(8, b'\0')  # Padding key to 8 bytes
-    cipher = DES.new(session_key, DES.MODE_CBC)  # CBC mode
-    padded_message = pad(message.encode('utf-8'), DES.block_size)  # Pad message to block size
-    encrypted_message = cipher.encrypt(padded_message)
-    return cipher.iv + encrypted_message  # Send the IV along with the message for decryption
-
-
-def decrypt_session_message(encrypted_message, session_key):
-    session_key = session_key.encode('utf-8').ljust(8, b'\0')  # Ensure key is 8 bytes long
-    iv = encrypted_message[:8]  # Extract the IV from the beginning
-    encrypted_message = encrypted_message[8:]  # Get the actual encrypted message
-    cipher = DES.new(session_key, DES.MODE_CBC, iv)  # Use the same IV for decryption
-    decrypted_message = unpad(cipher.decrypt(encrypted_message), DES.block_size)  # Remove padding
-    return decrypted_message.decode('utf-8')
-
-
-def encrypt_message_by_private(recipient_public_key_pem, message):
-    """Encrypts a message using the recipient's public key with OAEP padding."""
-    recipient_public_key = serialization.load_pem_public_key(recipient_public_key_pem.encode('utf-8'))
-    encrypted = recipient_public_key.encrypt(
-        message.encode('utf-8'),
-        padding.OAEP(  # Using OAEP padding for better security
-            mgf=padding.MGF1(algorithm=hashes.SHA256()),
-            algorithm=hashes.SHA256(),
-            label=None
-        )
-    )
-    return encrypted.hex()
-
-
-def decrypt_message_by_public(private_key_pem, encrypted_message_hex):
-    """Decrypts a message using the private key with OAEP padding."""
-    private_key = serialization.load_pem_private_key(private_key_pem.encode('utf-8'), password=None)
-    encrypted_message = bytes.fromhex(encrypted_message_hex)
-    decrypted = private_key.decrypt(
-        encrypted_message,
-        padding.OAEP(  # Must match the padding used during encryption
-            mgf=padding.MGF1(algorithm=hashes.SHA256()),
-            algorithm=hashes.SHA256(),
-            label=None
-        )
-    )
-    return decrypted.decode('utf-8')
-
-
-def register(conn, username, password):
-    """Registers a new user with the server."""
-    message = {
-        "command": "REGISTER",
-        "payload": {
-            "username": username,
-            "password": password
-        }
-    }
-    try:
-        send_command(conn, message)
-        response = receive_response()
-        if response and response.get('status', '').lower() == 'success':
-            print(f"Server: {response.get('message')}")
-        else:
-            print(f"Server: {response.get('message', 'Registration failed.')}")
-    except Exception as e:
-        print(f"Error during registration: {e}")
-
-
-def setup_client_socket():
-    """
-    Creates a global socket, binds it to a dynamic port, and starts a thread to listen for messages.
-    Returns the dynamically assigned client IP and port.
-    """
-    global client_socket
-
-    # Get the client IP dynamically
-    client_ip = socket.gethostbyname(socket.gethostname())
-
-    # Create a global socket with a dynamic port
-    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client_socket.bind((client_ip, 0))  # Bind to any available port
-    client_socket.listen(1)  # Set up the socket to listen for incoming connections
-
-    # Get the dynamically assigned port
-    client_port = client_socket.getsockname()[1]
-
-    # Start a thread to listen for messages
-    listener_thread = threading.Thread(target=listen_for_messages, args=(client_socket,))
-    listener_thread.daemon = True  # Ensure thread stops when the main program exits
-    listener_thread.start()
-
-    return client_ip, client_port
-
-
-def listen_for_messages(sock):
-    """
-    Thread function to listen for incoming messages and handle the described sequence.
-    """
-    try:
-        with open("client.key", "r") as f:
-            private_key_pem = f.read()
-    except FileNotFoundError:
-        print("Private key file 'client.key' not found.")
-        sys.exit(1)
-
-    HEADER_SIZE = 20  # Fixed size for the header
-    HEADER_IDENTIFIER = "SESSION_KEY"  # Unique identifier for session key messages
-
-    print("Listening for incoming messages...")
-    while True:
+    def start(self):
+        """Initialize the client connection and start the interaction."""
+        # Configure SSL context for the client
+        context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile='ca.pem')
         try:
-            conn, addr = sock.accept()  # Accept incoming connections
-            print(f"Connection established with {addr}")
-            print("Do you want to accept messages from this client(yes/no)")
-            global flag
-            flag = True
-            while True:
-                # Step 1: Receive the fixed-size header
-                header = conn.recv(HEADER_SIZE).decode('utf-8').strip()
-                if not header:
-                    print(f"Connection closed by {addr}")
-                    break
-
-                # Step 2: Check the header identifier
-                if header == HEADER_IDENTIFIER:
-                    # Step 3: Receive the full message
-                    full_message = conn.recv(1024)
-                    print(f"Received encrypted session key message from {addr}.")
-
-                    try:
-                        # Step 4: Decrypt the message using the private key
-                        decrypted_message = decrypt_message_by_public(private_key_pem, full_message.decode('utf-8'))
-                        print(f"Decrypted message from {addr}: {decrypted_message}")
-
-                        # Step 5: Parse the decrypted message to extract the session key
-                        message_data = json.loads(decrypted_message)
-                        session_key = message_data.get("session_key")
-                        if session_key:
-                            print(f"Extracted session key from {addr}: {session_key}")
-                        else:
-                            print(f"Session key not found in decrypted message from {addr}.")
-                            continue
-
-                        # Step 5: Send a challenge to Client A
-                        challenge = "3 + 5"  # Example challenge
-                        print(f"Sending challenge to {addr}: {challenge}")
-
-                        # Encrypt challenge using the session key (if applicable)
-                        encrypted_challenge = encrypt_session_message(challenge, session_key)
-                        conn.sendall(encrypted_challenge)
-
-                        # Step 6: Wait for and verify the solution
-                        encrypted_solution = conn.recv(1024)
-                        if not encrypted_solution:
-                            print(f"Connection closed by {addr}")
-                            break
-
-                        # Decrypt the solution using the session key
-                        solution = decrypt_session_message(encrypted_solution, session_key)
-                        print(f"Received decrypted solution from {addr}: {solution}")
-
-                        # Verify the solution
-                        expected_solution = str(eval(challenge))
-                        if solution == expected_solution:
-                            print(f"Challenge solved correctly by {addr}.")
-                            encrypted_ack = encrypt_session_message("Correct solution!", session_key)
-                            conn.sendall(encrypted_ack)
-                            handle_messaging(conn, "sender", session_key)
-
-                        else:
-                            print(f"Incorrect solution by {addr}.")
-                            encrypted_ack = encrypt_session_message("Incorrect solution.", session_key)
-                            conn.sendall(encrypted_ack)
-                    except Exception as e:
-                        print(f"Error decrypting the session key or handling challenge: {e}")
-                        conn.sendall("Error handling session key.".encode('utf-8'))
-                else:
-                    print(f"Unknown message type from {addr} with header: {header}")
-                    conn.sendall("Unknown message type.".encode('utf-8'))
-        except BlockingIOError:
-            # No incoming connection or data, continue
-            pass
+            context.load_cert_chain(certfile='client.pem', keyfile='client.key')  # Client's cert and key
         except Exception as e:
-            print(f"Error in listener thread: {e}")
-            break
+            print(Fore.RED + f"Error loading certificates: {e}")
+            sys.exit(1)
 
+        # Enforce TLS versions
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.maximum_version = ssl.TLSVersion.TLSv1_3
 
-def login(conn, username, password):
-    """
-    Logs in an existing user, opens a global socket, and sends client IP and port to the server.
-    """
-    try:
-        # Set up the client socket and start listening
-        client_ip, client_port = setup_client_socket()
+        # Ensure that the server's hostname matches the certificate's SAN
+        context.check_hostname = True
 
-        # Prepare the login message
-        message = {
-            "command": "LOGIN",
-            "payload": {
-                "username": username,
-                "password": password,
-                "client_ip": client_ip,
-                "client_port": client_port
-            }
-        }
+        # Create a TCP/IP socket
+        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-        # Send the login command
-        send_command(conn, message)
-        response = receive_response()
-        if response and response.get('status', '').lower() == 'success':
-            print(f"Server: {response.get('message')}")
+        try:
+            # Wrap socket with SSL
+            self.conn = context.wrap_socket(client_socket, server_hostname='localhost')  # 'localhost' matches SAN
+            self.conn.connect((self.server_host, self.server_port))
+            print(Fore.GREEN + "Connected to server with mTLS" + Fore.RESET)
+
+            self.show_main_menu()
+
+        except ssl.SSLError as e:
+            print(Fore.RED + f"SSL error: {e}" + Fore.RESET)
+        except ConnectionRefusedError:
+            print(Fore.RED + "Connection refused. Ensure the server is running." + Fore.RESET)
+        except Exception as e:
+            print(Fore.RED + f"An error occurred: {e}" + Fore.RESET)
+        finally:
+            self.shutdown()
+
+    def show_main_menu(self):
+        """Display the main menu and handle user choices."""
+        while self.running:
+            print("\nChoose an option:")
+            print("1. Register")
+            print("2. Login")
+            print("3. Exit")
+
+            choice = input("Enter choice (1/2/3): ").strip()
+
+            if choice == '1':
+                self.handle_register()
+            elif choice == '2':
+                if self.handle_login():
+                    # Start the input loop after successful login
+                    self.input_loop()
+            elif choice == '3':
+                self.send_exit()
+                break
+            else:
+                print(Fore.YELLOW + "Invalid choice. Please enter 1, 2, or 3." + Fore.RESET)
+
+    def handle_register(self):
+        """Handle user registration."""
+        username = input("Enter desired username: ").strip()
+        password = input("Enter desired password: ").strip()
+        self.register_user(username, password)
+
+    def handle_login(self):
+        """Handle user login."""
+        username = input("Enter username: ").strip()
+        password = input("Enter password: ").strip()
+        success = self.login_user(username, password)
+        if success:
+            print(Fore.GREEN + "Login successful." + Fore.RESET)
+            # Load private key
+            try:
+                with open("client.key", "r") as f:
+                    self.private_key_pem = f.read()
+            except FileNotFoundError:
+                print(Fore.RED + "Private key file 'client.key' not found." + Fore.RESET)
+                self.running = False
+                return False
             return True
         else:
-            print(f"Server: {response.get('message', 'Login failed.')}")
+            print(Fore.RED + "Login failed." + Fore.RESET)
             return False
-    except Exception as e:
-        print(f"Error during login: {e}")
-        return False
+
+    def input_loop(self):
+        """Handle user commands and messaging."""
+        while self.running:
+            if not self.in_session:
+                # Command mode
+                prompt = "\nEnter command (session/exit): "
+            else:
+                # Messaging mode
+                prompt = Fore.LIGHTBLUE_EX + "You: " + Fore.RESET
+
+            try:
+                user_input = input(prompt).strip()
+            except EOFError:
+                # Handle unexpected EOF (e.g., Ctrl+D)
+                self.send_exit()
+                break
+            except KeyboardInterrupt:
+                # Handle Ctrl+C gracefully
+                self.send_exit()
+                break
+
+            # After receiving input, check the current session state
+            if self.in_session:
+                # Messaging mode: Treat input as a message
+                if user_input == ":q":
+                    self.send_message(":q")
+                    self.in_session = False
+                    print(Fore.RED + "You have ended the chat." + Fore.RESET)
+                elif user_input:
+                    self.send_message(user_input)
+            else:
+                # Command mode: Treat input as a command
+                if user_input.lower() == "session":
+                    self.start_session()
+                    if self.in_session:
+                        print(Fore.GREEN + "Session established. You can start messaging." + Fore.RESET)
+                    else:
+                        print(Fore.RED + "Session initiation failed." + Fore.RESET)
+                elif user_input.lower() == "exit":
+                    self.send_exit()
+                    break
+                else:
+                    print(Fore.YELLOW + "Unknown command. Available commands: session, exit" + Fore.RESET)
 
 
-def request_session(conn, id_A, id_B):
-    """Requests a secure session between two users."""
-    message = {
-        "command": "REQUEST_SESSION",
-        "payload": {
-            "id_A": id_A,
-            "id_B": id_B
-        }
-    }
-    try:
-        send_command(conn, message)
-        response = receive_response()
-        if response and response.get('status', '').lower() == 'success':
-            encrypted_messages = response.get('encrypted_messages', {})
-            client_B_info = response.get('client_B_info', {})
-            to_A = encrypted_messages.get('to_A')
-            to_B = encrypted_messages.get('to_B')
-            return to_A, to_B, client_B_info
-        else:
-            print(f"Server: {response.get('message', 'Session request failed.')}")
-            return None, None, None
-    except Exception as e:
-        print(f"Error during session request: {e}")
-        return None, None, None
+    def start_session(self):
+        """Initiate a session with another user."""
+        id_A = input("Enter your username: ").strip()
+        id_B = input("Enter recipient username: ").strip()
+        to_A, to_B, client_B_info = self.request_session(id_A, id_B)
+        if to_A and to_B and client_B_info:
+            # Decrypt message1 with own private key to get session key
+            decrypted_message1 = self.decrypt_message_by_public(self.private_key_pem, to_A)
+            try:
+                message1 = json.loads(decrypted_message1)
+                session_key = message1.get("session_key")
+                if not session_key:
+                    print(Fore.RED + "Session key not found in decrypted message." + Fore.RESET)
+                    return
+                print(Fore.GREEN + f"Session key established with {id_B}." + Fore.RESET)
 
+                # Store session_key for future use
+                self.session_keys[id_B] = session_key
 
-def send_command(conn, message):
-    """Sends a JSON-encoded command to the server."""
-    try:
-        conn.sendall(json.dumps(message).encode('utf-8'))
-    except Exception as e:
-        print(f"Error sending command: {e}")
+                # Connect to client_B using IP and port
+                client_B_ip = client_B_info.get("ip")
+                client_B_port = int(client_B_info.get("port"))
 
+                # Establish connection to Client B
+                self.connect_to_peer(client_B_ip, client_B_port, session_key, to_B, id_B)
 
-def receive_response():
-    """Receives and parses a JSON-encoded response from the server."""
-    try:
-        response = conn.recv(8192).decode('utf-8')
-        print(f"Received raw response: {response}")  # Debugging aid
-        response_data = json.loads(response)
-        return response_data
-    except json.JSONDecodeError as e:
-        print(f"JSON decode error: {e}")
-        print(f"Received data: {response}")
-        return None
-    except Exception as e:
-        print(f"Error receiving response: {e}")
-        return None
+            except json.JSONDecodeError as e:
+                print(Fore.RED + f"JSON decode error after decrypting message1: {e}" + Fore.RESET)
+                print(f"Decrypted message1: {decrypted_message1}")
 
+    def connect_to_peer(self, client_B_ip, client_B_port, session_key, to_B, id_B):
+        """Connect to the peer and perform challenge-response."""
+        HEADER_IDENTIFIER = "SESSION_KEY"
 
-def encrypt_with_session_key(session_key, message):
-    """
-    Encrypts a message using a session key.
-    Note: XOR encryption is insecure. Replace with AES for production.
-    """
-    try:
-        encrypted = ''.join(
-            chr(b ^ session_key[i % len(session_key)]) for i, b in enumerate(message.encode('utf-8'))
-        )
-        return encrypted
-    except Exception as e:
-        print(f"Error encrypting with session key: {e}")
-        return ""
+        try:
+            peer_socket = socket.create_connection((client_B_ip, client_B_port))
+            self.peer_socket = peer_socket
+            self.peer_name = id_B
 
-
-def decrypt_with_session_key(session_key, encrypted_message):
-    """
-    Decrypts a message using a session key.
-    Note: XOR decryption is insecure. Replace with AES for production.
-    """
-    try:
-        decrypted = ''.join(
-            chr(b ^ session_key[i % len(session_key)]) for i, b in enumerate(encrypted_message.encode('utf-8'))
-        )
-        return decrypted
-    except Exception as e:
-        print(f"Error decrypting with session key: {e}")
-        return ""
-
-
-def send_session_key(client_B_ip, client_B_port, session_key, to_B, id_B):
-    """
-    Sends the session key and handles challenge-response authentication with Client B.
-    """
-    HEADER_IDENTIFIER = "SESSION_KEY"
-
-    try:
-        with socket.create_connection((client_B_ip, client_B_port)) as client_B_conn:
             # Step 1: Send the session key message with a header
             header = f"{HEADER_IDENTIFIER:<20}"  # Fixed-size header with unique identifier
-            client_B_conn.sendall(header.encode('utf-8') + to_B.encode('utf-8'))
-            print(f"Sent session key message to Client B at {client_B_ip}:{client_B_port}.")
+            encrypted_session_key = to_B.encode('utf-8')  # Assuming to_B is already encrypted
+            peer_socket.sendall(header.encode('utf-8') + encrypted_session_key)
+            print(Fore.GREEN + f"Sent session key message to Client B at {client_B_ip}:{client_B_port}." + Fore.RESET)
 
             # Step 2: Wait for the encrypted challenge from Client B
-            encrypted_challenge = client_B_conn.recv(1024)
+            encrypted_challenge = peer_socket.recv(1024)
             if not encrypted_challenge:
-                print(f"Connection closed by {client_B_ip}:{client_B_port}")
+                print(Fore.RED + f"Connection closed by {client_B_ip}:{client_B_port}" + Fore.RESET)
+                peer_socket.close()
                 return
 
-            challenge = decrypt_session_message(encrypted_challenge, session_key)
-            print(f"Received encrypted challenge from Client B: {challenge}")
+            challenge = self.decrypt_session_message(encrypted_challenge, session_key)
+            print(Fore.CYAN + f"Received encrypted challenge from Client B: {challenge}" + Fore.RESET)
 
             # Step 3: Solve the challenge
             try:
                 solution = str(eval(challenge))
             except Exception as e:
-                print(f"Error solving the challenge: {e}")
+                print(Fore.RED + f"Error solving the challenge: {e}" + Fore.RESET)
                 solution = "Error"
 
             # Step 4: Encrypt the solution and send it back
-            encrypted_solution = encrypt_session_message(solution, session_key)
-            client_B_conn.sendall(encrypted_solution)
-            print(f"Sent encrypted solution to Client B: {solution}")
+            encrypted_solution = self.encrypt_session_message(solution, session_key)
+            peer_socket.sendall(encrypted_solution)
+            print(Fore.GREEN + f"Sent encrypted solution to Client B: {solution}" + Fore.RESET)
 
             # Step 5: Wait for acknowledgment from Client B
-            encrypted_ack = client_B_conn.recv(1024)
-            acknowledgment = decrypt_session_message(encrypted_ack, session_key)
-            print(f"Received acknowledgment from Client B: {acknowledgment}")
+            encrypted_ack = peer_socket.recv(1024)
+            acknowledgment = self.decrypt_session_message(encrypted_ack, session_key)
+            print(Fore.CYAN + f"Received acknowledgment from Client B: {acknowledgment}" + Fore.RESET)
             if acknowledgment == "Correct solution!":
-                handle_messaging(client_B_conn, "sender", session_key)
-
-    except Exception as e:
-        print(f"Error sending session key to Client B: {e}")
-
-
-flag = False
-
-
-def communicate(conn, private_key_pem, session_keys):
-    """Handles user commands and interactions."""
-    while True:
-        try:
-            if flag:
-                continue
-            command = input("Enter command (session/exit): ").strip().lower()
-            if command == "session":
-                # After requesting session:
-                id_A = input("Enter your username: ").strip()
-                id_B = input("Enter recipient username: ").strip()
-                to_A, to_B, client_B_info = request_session(conn, id_A, id_B)
-                if to_A and to_B and client_B_info:
-                    # Decrypt message1 with own private key to get session key
-                    decrypted_message1 = decrypt_message_by_public(private_key_pem, to_A)
-                    try:
-                        message1 = json.loads(decrypted_message1)
-                        session_key = message1.get("session_key")
-                        if not session_key:
-                            print("Session key not found in decrypted message.")
-                            continue
-                        print(f"Session key established with {id_B}.")
-
-                        # Store session_key for future use
-                        session_keys[id_B] = session_key
-
-                        # Connect to client_B using IP and port
-                        client_B_ip = client_B_info.get("ip")
-                        client_B_port = int(client_B_info.get("port"))
-
-                        send_session_key(client_B_ip, client_B_port, session_key, to_B, id_B)
-
-                    except json.JSONDecodeError as e:
-                        print(f"JSON decode error after decrypting message1: {e}")
-                        print(f"Decrypted message1: {decrypted_message1}")
-            elif command == "exit":
-                message = {"command": "EXIT", "payload": {}}
-                try:
-                    send_command(conn, message)
-                    response = receive_response()
-                    if response and response.get('status', '').lower() == 'success':
-                        print("Disconnecting from the server.")
-                    else:
-                        print(f"Server: {response.get('message', 'Failed to exit gracefully.')}")
-                except Exception as e:
-                    print(f"Error during exit: {e}")
-                break
-
+                print(Fore.GREEN + "Challenge solved correctly. You are now connected." + Fore.RESET)
+                self.in_session = True
+                self.session_established.set()  # Signal that session is established
+                # Start a thread to receive messages from the peer
+                self.receive_thread = threading.Thread(target=self.receive_messages, args=(peer_socket, id_B, session_key), daemon=True)
+                self.receive_thread.start()
             else:
-                print("Unknown command. Available commands: session, send, rotate, revoke, exit")
-        except KeyboardInterrupt:
-            print("\nKeyboard interrupt received. Exiting.")
-            break
+                print(Fore.RED + "Incorrect solution. Connection terminated." + Fore.RESET)
+                peer_socket.close()
+
         except Exception as e:
-            print(f"Error during communication: {e}")
-            break
-    # Close the connection after exiting the loop
-    try:
-        conn.close()
-    except:
-        pass
-    print("Client shut down.")
+            print(Fore.RED + f"Error sending session key to Client B: {e}" + Fore.RESET)
 
-
-def start_client():
-    """Initializes the client connection and starts the interaction."""
-    host = '127.0.0.1'  # Server address
-    port = 12345  # Server port
-
-    # Configure SSL context for the client
-    context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile='ca.pem')
-    context.load_cert_chain(certfile='client.pem', keyfile='client.key')  # Client's cert and key
-
-    # Enforce TLS versions
-    context.minimum_version = ssl.TLSVersion.TLSv1_2
-    context.maximum_version = ssl.TLSVersion.TLSv1_3
-
-    # Ensure that the server's hostname matches the certificate's SAN
-    context.check_hostname = True
-
-    # Create a TCP/IP socket
-    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-    try:
-        # Wrap socket with SSL
-        global conn  # Make conn global to be accessible in receive_response
-        conn = context.wrap_socket(client_socket, server_hostname='localhost')  # 'localhost' matches SAN
-        conn.connect((host, port))
-        print("Connected to server with mTLS")
-        print("Choose an option:")
-        print("1. Register")
-        print("2. Login")
-        print("3. Exit")
-
-        choice = input("Enter choice (1/2/3): ").strip()
-
-        if choice == '1':
-            username = input("Enter desired username: ").strip()
-            password = input("Enter desired password: ").strip()
-            register(conn, username, password)
-        elif choice == '2':
-            username = input("Enter username: ").strip()
-            password = input("Enter password: ").strip()
-            success = login(conn, username, password)
-            if success:
-                print("You can now send messages. Type 'exit' to disconnect.")
-                # Load private key
-                try:
-                    with open("client.key", "r") as f:
-                        private_key_pem = f.read()
-                except FileNotFoundError:
-                    print("Private key file 'client.key' not found.")
-                    conn.close()
-                    sys.exit(1)
-                # Initialize session keys dictionary
-                session_keys = {}
-                # Start communication
-                communicate(conn, private_key_pem, session_keys)
-            else:
-                print("Login failed. Exiting.")
-        elif choice == '3':
-            message = {"command": "EXIT", "payload": {}}
-            try:
-                send_command(conn, message)
-                response = receive_response()
-                if response and response.get('status', '').lower() == 'success':
-                    print("Disconnecting from the server.")
-                else:
-                    print(f"Server: {response.get('message', 'Failed to exit gracefully.')}")
-            except Exception as e:
-                print(f"Error during exit: {e}")
-        else:
-            print("Invalid choice. Exiting.")
-
-    except ssl.SSLError as e:
-        print(f"SSL error: {e}")
-    except ConnectionRefusedError:
-        print("Connection refused. Ensure the server is running.")
-    except Exception as e:
-        print(f"An error occurred: {e}")
-    finally:
+    def request_session(self, id_A, id_B):
+        """Requests a secure session between two users."""
+        message = {
+            "command": "REQUEST_SESSION",
+            "payload": {
+                "id_A": id_A,
+                "id_B": id_B
+            }
+        }
         try:
-            conn.close()
+            self.send_command(self.conn, message)
+            response = self.receive_response()
+            if response and response.get('status', '').lower() == 'success':
+                encrypted_messages = response.get('encrypted_messages', {})
+                client_B_info = response.get('client_B_info', {})
+                to_A = encrypted_messages.get('to_A')
+                to_B = encrypted_messages.get('to_B')
+                return to_A, to_B, client_B_info
+            else:
+                print(Fore.RED + f"Server: {response.get('message', 'Session request failed.')}" + Fore.RESET)
+                return None, None, None
+        except Exception as e:
+            print(Fore.RED + f"Error during session request: {e}" + Fore.RESET)
+            return None, None, None
+
+    def receive_messages(self, peer_socket, peer_name, session_key):
+        """Thread function to receive messages from the peer."""
+        while self.running and self.in_session:
+            try:
+                encrypted_message = peer_socket.recv(1024)
+                if not encrypted_message:
+                    print(Fore.RED + f"{peer_name} disconnected." + Fore.RESET)
+                    self.in_session = False
+                    break
+                # Decrypt the message
+                decrypted_message = self.decrypt_session_message(encrypted_message, session_key)
+                if not decrypted_message or decrypted_message == ":q":
+                    print(Fore.RED + f"{peer_name} has ended the chat." + Fore.RESET)
+                    self.in_session = False
+                    break
+                print(Fore.MAGENTA + f"{peer_name}: {decrypted_message}" + Fore.RESET)
+            except ConnectionResetError:
+                print(Fore.RED + f"{peer_name} disconnected abruptly." + Fore.RESET)
+                self.in_session = False
+                break
+            except Exception as e:
+                print(Fore.RED + f"Error receiving message: {e}" + Fore.RESET)
+                self.in_session = False
+                break
+        peer_socket.close()
+
+    def encrypt_session_message(self, message, session_key):
+        """Encrypts a message using DES with the provided session key."""
+        # Ensure the key is 8 bytes long (DES uses 8-byte keys)
+        session_key_bytes = session_key.encode('utf-8')[:8]  # Truncate or pad to 8 bytes
+        cipher = DES.new(session_key_bytes, DES.MODE_CBC)
+        padded_message = pad(message.encode('utf-8'), DES.block_size)  # Pad message to block size
+        encrypted_message = cipher.encrypt(padded_message)
+        return cipher.iv + encrypted_message  # Send the IV along with the message for decryption
+
+    def decrypt_session_message(self, encrypted_message, session_key):
+        """Decrypts a message using DES with the provided session key."""
+        try:
+            session_key_bytes = session_key.encode('utf-8')[:8]  # Truncate or pad to 8 bytes
+            iv = encrypted_message[:8]  # Extract the IV from the beginning
+            encrypted_payload = encrypted_message[8:]  # Get the actual encrypted message
+            cipher = DES.new(session_key_bytes, DES.MODE_CBC, iv)  # Use the same IV for decryption
+            decrypted_padded = cipher.decrypt(encrypted_payload)
+            decrypted_message = unpad(decrypted_padded, DES.block_size).decode('utf-8')
+            return decrypted_message
+        except ValueError:
+            print(Fore.RED + "Incorrect decryption." + Fore.RESET)
+            return ""
+        except Exception as e:
+            print(Fore.RED + f"Error during decryption: {e}" + Fore.RESET)
+            return ""
+
+    def encrypt_message_by_private(self, recipient_public_key_pem, message):
+        """Encrypts a message using the recipient's public key with OAEP padding."""
+        try:
+            recipient_public_key = serialization.load_pem_public_key(recipient_public_key_pem.encode('utf-8'))
+            encrypted = recipient_public_key.encrypt(
+                message.encode('utf-8'),
+                padding.OAEP(  # Using OAEP padding for better security
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
+            )
+            return encrypted.hex()
+        except Exception as e:
+            print(Fore.RED + f"Error encrypting message with recipient's public key: {e}" + Fore.RESET)
+            return ""
+
+    def decrypt_message_by_public(self, private_key_pem, encrypted_message_hex):
+        """Decrypts a message using the private key with OAEP padding."""
+        try:
+            private_key = serialization.load_pem_private_key(private_key_pem.encode('utf-8'), password=None)
+            encrypted_message = bytes.fromhex(encrypted_message_hex)
+            decrypted = private_key.decrypt(
+                encrypted_message,
+                padding.OAEP(  # Must match the padding used during encryption
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
+            )
+            return decrypted.decode('utf-8')
+        except Exception as e:
+            print(Fore.RED + f"Error decrypting message with private key: {e}" + Fore.RESET)
+            return ""
+
+    def register_user(self, username, password):
+        """Registers a new user with the server."""
+        message = {
+            "command": "REGISTER",
+            "payload": {
+                "username": username,
+                "password": password
+            }
+        }
+        try:
+            self.send_command(self.conn, message)
+            response = self.receive_response()
+            if response and response.get('status', '').lower() == 'success':
+                print(Fore.GREEN + f"Server: {response.get('message')}" + Fore.RESET)
+            else:
+                print(Fore.RED + f"Server: {response.get('message', 'Registration failed.')}" + Fore.RESET)
+        except Exception as e:
+            print(Fore.RED + f"Error during registration: {e}" + Fore.RESET)
+
+    def login_user(self, username, password):
+        """Logs in an existing user."""
+        try:
+            # Set up the client socket and start listening
+            client_ip, client_port = self.setup_client_socket()
+
+            # Prepare the login message
+            message = {
+                "command": "LOGIN",
+                "payload": {
+                    "username": username,
+                    "password": password,
+                    "client_ip": client_ip,
+                    "client_port": client_port
+                }
+            }
+
+            # Send the login command
+            self.send_command(self.conn, message)
+            response = self.receive_response()
+            if response and response.get('status', '').lower() == 'success':
+                print(Fore.GREEN + f"Server: {response.get('message')}" + Fore.RESET)
+                return True
+            else:
+                print(Fore.RED + f"Server: {response.get('message', 'Login failed.')}" + Fore.RESET)
+                return False
+        except Exception as e:
+            print(Fore.RED + f"Error during login: {e}" + Fore.RESET)
+            return False
+
+    def setup_client_socket(self):
+        """
+        Creates a socket, binds it to a dynamic port, and starts a thread to listen for messages.
+        Returns the dynamically assigned client IP and port.
+        """
+        # Get the client IP dynamically
+        try:
+            client_ip = socket.gethostbyname(socket.gethostname())
+        except socket.gaierror:
+            client_ip = '127.0.0.1'  # Fallback to localhost
+
+        # Create a socket with a dynamic port
+        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client_socket.bind((client_ip, 0))  # Bind to any available port
+        client_socket.listen(5)  # Listen for incoming connections
+
+        # Get the dynamically assigned port
+        client_port = client_socket.getsockname()[1]
+
+        print(Fore.GREEN + f"Listening for incoming connections on {client_ip}:{client_port}" + Fore.RESET)
+
+        # Start a thread to listen for messages
+        listener_thread = threading.Thread(target=self.listen_for_messages, args=(client_socket,), daemon=True)
+        listener_thread.start()
+
+        return client_ip, client_port
+
+    def listen_for_messages(self, sock):
+        """
+        Thread function to listen for incoming messages and handle the described sequence.
+        """
+        HEADER_SIZE = 20  # Fixed size for the header
+        HEADER_IDENTIFIER = "SESSION_KEY"  # Unique identifier for session key messages
+
+        print(Fore.YELLOW + "Listening for incoming messages..." + Fore.RESET)
+        while self.running:
+            try:
+                conn, addr = sock.accept()  # Accept incoming connections
+                print(Fore.GREEN + f"Connection established with {addr}" + Fore.RESET)
+
+                # Step 1: Receive the fixed-size header
+                header = conn.recv(HEADER_SIZE).decode('utf-8').strip()
+                if not header:
+                    print(Fore.RED + f"Connection closed by {addr}" + Fore.RESET)
+                    conn.close()
+                    continue
+
+                # Step 2: Check the header identifier
+                if header == HEADER_IDENTIFIER:
+                    # Step 3: Receive the full message
+                    full_message = conn.recv(1024)
+                    print(Fore.CYAN + f"Received encrypted session key message from {addr}." + Fore.RESET)
+
+                    try:
+                        # Step 4: Decrypt the message using the private key
+                        decrypted_message = self.decrypt_message_by_public(self.private_key_pem, full_message.decode('utf-8'))
+                        print(Fore.CYAN + f"Decrypted message from {addr}: {decrypted_message}" + Fore.RESET)
+
+                        # Step 5: Parse the decrypted message to extract the session key and id_A
+                        message_data = json.loads(decrypted_message)
+                        session_key = message_data.get("session_key")
+                        id_A = message_data.get("id_A")
+                        if not session_key or not id_A:
+                            print(Fore.RED + f"Session key or id_A not found in decrypted message from {addr}." + Fore.RESET)
+                            conn.close()
+                            continue
+
+                        print(Fore.GREEN + f"Extracted session key from {addr}: {session_key}" + Fore.RESET)
+
+                        # Store session_key under id_A
+                        self.session_keys[id_A] = session_key
+                        self.peer_name = id_A
+                        print(Fore.BLUE + f"Session keys updated: {self.session_keys}" + Fore.RESET)  # Debugging
+
+                        # Step 5: Send a challenge to Client A
+                        challenge = "3 + 5"  # Example challenge
+                        print(Fore.CYAN + f"Sending challenge to {addr}: {challenge}" + Fore.RESET)
+
+                        # Encrypt challenge using the session key
+                        encrypted_challenge = self.encrypt_session_message(challenge, session_key)
+                        conn.sendall(encrypted_challenge)
+
+                        # Step 6: Wait for and verify the solution
+                        encrypted_solution = conn.recv(1024)
+                        if not encrypted_solution:
+                            print(Fore.RED + f"Connection closed by {addr}" + Fore.RESET)
+                            conn.close()
+                            continue
+
+                        # Decrypt the solution using the session key
+                        solution = self.decrypt_session_message(encrypted_solution, session_key)
+                        print(Fore.CYAN + f"Received decrypted solution from {addr}: {solution}" + Fore.RESET)
+
+                        # Verify the solution
+                        expected_solution = str(eval(challenge))
+                        if solution == expected_solution:
+                            print(Fore.GREEN + f"Challenge solved correctly by {addr}." + Fore.RESET)
+                            encrypted_ack = self.encrypt_session_message("Correct solution!", session_key)
+                            conn.sendall(encrypted_ack)
+                            # Start messaging with the peer
+                            self.session_established.set()  # Signal that session is established
+                            self.in_session = True
+                            self.peer_socket = conn
+                            self.peer_name = message_data.get("id_A")  # Set to the actual sender's username
+                            print(Fore.BLUE + f"Peer name set to: {self.peer_name}" + Fore.RESET)  # Debugging
+                            # Start a thread to receive messages from the peer
+                            self.receive_thread = threading.Thread(target=self.receive_messages, args=(conn, self.peer_name, session_key), daemon=True)
+                            self.receive_thread.start()
+                        else:
+                            print(Fore.RED + f"Incorrect solution by {addr}." + Fore.RESET)
+                            encrypted_ack = self.encrypt_session_message("Incorrect solution.", session_key)
+                            conn.sendall(encrypted_ack)
+                            conn.close()
+                    except Exception as e:
+                        print(Fore.RED + f"Error decrypting the session key or handling challenge: {e}" + Fore.RESET)
+                        try:
+                            conn.sendall("Error handling session key.".encode('utf-8'))
+                        except:
+                            pass
+                        conn.close()
+                else:
+                    print(Fore.RED + f"Unknown message type from {addr} with header: {header}" + Fore.RESET)
+                    try:
+                        conn.sendall("Unknown message type.".encode('utf-8'))
+                    except:
+                        pass
+                    conn.close()
+            except Exception as e:
+                print(Fore.RED + f"Error in listener thread: {e}" + Fore.RESET)
+                break
+        sock.close()
+
+    def request_session(self, id_A, id_B):
+        """Requests a secure session between two users."""
+        message = {
+            "command": "REQUEST_SESSION",
+            "payload": {
+                "id_A": id_A,
+                "id_B": id_B
+            }
+        }
+        try:
+            self.send_command(self.conn, message)
+            response = self.receive_response()
+            if response and response.get('status', '').lower() == 'success':
+                encrypted_messages = response.get('encrypted_messages', {})
+                client_B_info = response.get('client_B_info', {})
+                to_A = encrypted_messages.get('to_A')
+                to_B = encrypted_messages.get('to_B')
+                return to_A, to_B, client_B_info
+            else:
+                print(Fore.RED + f"Server: {response.get('message', 'Session request failed.')}" + Fore.RESET)
+                return None, None, None
+        except Exception as e:
+            print(Fore.RED + f"Error during session request: {e}" + Fore.RESET)
+            return None, None, None
+
+    def receive_messages(self, peer_socket, peer_name, session_key):
+        """Thread function to receive messages from the peer."""
+        while self.running and self.in_session:
+            try:
+                encrypted_message = peer_socket.recv(1024)
+                if not encrypted_message:
+                    print(Fore.RED + f"{peer_name} disconnected." + Fore.RESET)
+                    self.in_session = False
+                    break
+                # Decrypt the message
+                decrypted_message = self.decrypt_session_message(encrypted_message, session_key)
+                if not decrypted_message or decrypted_message == ":q":
+                    print(Fore.RED + f"{peer_name} has ended the chat." + Fore.RESET)
+                    self.in_session = False
+                    break
+                print(Fore.MAGENTA + f"{peer_name}: {decrypted_message}" + Fore.RESET)
+            except ConnectionResetError:
+                print(Fore.RED + f"{peer_name} disconnected abruptly." + Fore.RESET)
+                self.in_session = False
+                break
+            except Exception as e:
+                print(Fore.RED + f"Error receiving message: {e}" + Fore.RESET)
+                self.in_session = False
+                break
+        peer_socket.close()
+
+    def send_message(self, message):
+        """Send a message to the peer."""
+        if not self.peer_socket:
+            print(Fore.RED + "No active session to send messages." + Fore.RESET)
+            return
+        session_key = self.session_keys.get(self.peer_name)
+        print(Fore.BLUE + f"Attempting to send message to '{self.peer_name}' with session key: '{session_key}'" + Fore.RESET)  # Debugging
+        if not session_key:
+            print(Fore.RED + "Session key not found." + Fore.RESET)
+            return
+        try:
+            encrypted_message = self.encrypt_session_message(message, session_key)
+            self.peer_socket.sendall(encrypted_message)
+            if message == ":q":
+                self.in_session = False
+                self.peer_socket.close()
+                print(Fore.RED + "You have ended the chat." + Fore.RESET)
+        except Exception as e:
+            print(Fore.RED + f"Error sending message: {e}" + Fore.RESET)
+            self.in_session = False
+            self.peer_socket.close()
+
+    def encrypt_session_message(self, message, session_key):
+        """Encrypts a message using DES with the provided session key."""
+        # Ensure the key is 8 bytes long (DES uses 8-byte keys)
+        session_key_bytes = session_key.encode('utf-8')[:8]  # Truncate or pad to 8 bytes
+        cipher = DES.new(session_key_bytes, DES.MODE_CBC)
+        padded_message = pad(message.encode('utf-8'), DES.block_size)  # Pad message to block size
+        encrypted_message = cipher.encrypt(padded_message)
+        return cipher.iv + encrypted_message  # Send the IV along with the message for decryption
+
+    def decrypt_session_message(self, encrypted_message, session_key):
+        """Decrypts a message using DES with the provided session key."""
+        try:
+            session_key_bytes = session_key.encode('utf-8')[:8]  # Truncate or pad to 8 bytes
+            iv = encrypted_message[:8]  # Extract the IV from the beginning
+            encrypted_payload = encrypted_message[8:]  # Get the actual encrypted message
+            cipher = DES.new(session_key_bytes, DES.MODE_CBC, iv)  # Use the same IV for decryption
+            decrypted_padded = cipher.decrypt(encrypted_payload)
+            decrypted_message = unpad(decrypted_padded, DES.block_size).decode('utf-8')
+            return decrypted_message
+        except ValueError:
+            print(Fore.RED + "Incorrect decryption." + Fore.RESET)
+            return ""
+        except Exception as e:
+            print(Fore.RED + f"Error during decryption: {e}" + Fore.RESET)
+            return ""
+
+    def send_exit(self):
+        """Send an exit command to the server and stop the client."""
+        message = {"command": "EXIT", "payload": {}}
+        try:
+            self.send_command(self.conn, message)
+            response = self.receive_response()
+            if response and response.get('status', '').lower() == 'success':
+                print(Fore.GREEN + "Disconnecting from the server." + Fore.RESET)
+            else:
+                print(Fore.RED + f"Server: {response.get('message', 'Failed to exit gracefully.')}" + Fore.RESET)
+        except Exception as e:
+            print(Fore.RED + f"Error during exit: {e}" + Fore.RESET)
+        self.running = False
+        # Close peer connection if active
+        if self.peer_socket:
+            try:
+                self.peer_socket.close()
+            except:
+                pass
+        # Wait for receiving thread to finish
+        if self.receive_thread and self.receive_thread.is_alive():
+            self.receive_thread.join()
+        print(Fore.RED + "Client shut down." + Fore.RESET)
+
+    def send_command(self, conn, message):
+        """Sends a JSON-encoded command to the server."""
+        try:
+            conn.sendall(json.dumps(message).encode('utf-8'))
+        except Exception as e:
+            print(Fore.RED + f"Error sending command: {e}" + Fore.RESET)
+
+    def receive_response(self):
+        """Receives and parses a JSON-encoded response from the server."""
+        try:
+            response = self.conn.recv(8192).decode('utf-8')
+            print(Fore.BLUE + f"Received raw response: {response}" + Fore.RESET)  # Debugging aid
+            response_data = json.loads(response)
+            return response_data
+        except json.JSONDecodeError as e:
+            print(Fore.RED + f"JSON decode error: {e}" + Fore.RESET)
+            return None
+        except Exception as e:
+            print(Fore.RED + f"Error receiving response: {e}" + Fore.RESET)
+            return None
+
+    def shutdown(self):
+        """Shut down the client gracefully."""
+        self.running = False
+        try:
+            if self.conn:
+                self.conn.close()
         except:
             pass
-        print("Client shut down.")
-
+        print(Fore.RED + "Client shut down." + Fore.RESET)
 
 if __name__ == "__main__":
-    start_client()
+    client = ChatClient()
+    client.start()
+
+
