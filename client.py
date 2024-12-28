@@ -164,7 +164,7 @@ class ChatClient:
         to_A, to_B, client_B_info = self.request_session(id_A, id_B)
         if to_A and to_B and client_B_info:
             # Decrypt message1 with own private key to get session key
-            decrypted_message1 = self.decrypt_message_by_public(self.private_key_pem, to_A)
+            decrypted_message1 = self.decrypt_message_by_private(self.private_key_pem, to_A)
             try:
                 message1 = json.loads(decrypted_message1)
                 session_key = message1.get("session_key")
@@ -319,24 +319,7 @@ class ChatClient:
             print(Fore.RED + f"Error during decryption: {e}" + Fore.RESET)
             return ""
 
-    def encrypt_message_by_private(self, recipient_public_key_pem, message):
-        """Encrypts a message using the recipient's public key with OAEP padding."""
-        try:
-            recipient_public_key = serialization.load_pem_public_key(recipient_public_key_pem.encode('utf-8'))
-            encrypted = recipient_public_key.encrypt(
-                message.encode('utf-8'),
-                padding.OAEP(  # Using OAEP padding for better security
-                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                    algorithm=hashes.SHA256(),
-                    label=None
-                )
-            )
-            return encrypted.hex()
-        except Exception as e:
-            print(Fore.RED + f"Error encrypting message with recipient's public key: {e}" + Fore.RESET)
-            return ""
-
-    def decrypt_message_by_public(self, private_key_pem, encrypted_message_hex):
+    def decrypt_message_by_private(self, private_key_pem, encrypted_message_hex):
         """Decrypts a message using the private key with OAEP padding."""
         try:
             private_key = serialization.load_pem_private_key(private_key_pem.encode('utf-8'), password=None)
@@ -535,57 +518,6 @@ class ChatClient:
                 break
         sock.close()
 
-    def request_session(self, id_A, id_B):
-        """Requests a secure session between two users."""
-        message = {
-            "command": "REQUEST_SESSION",
-            "payload": {
-                "id_A": id_A,
-                "id_B": id_B
-            }
-        }
-        try:
-            self.send_command(self.conn, message)
-            response = self.receive_response()
-            if response and response.get('status', '').lower() == 'success':
-                encrypted_messages = response.get('encrypted_messages', {})
-                client_B_info = response.get('client_B_info', {})
-                to_A = encrypted_messages.get('to_A')
-                to_B = encrypted_messages.get('to_B')
-                return to_A, to_B, client_B_info
-            else:
-                print(Fore.RED + f"Server: {response.get('message', 'Session request failed.')}" + Fore.RESET)
-                return None, None, None
-        except Exception as e:
-            print(Fore.RED + f"Error during session request: {e}" + Fore.RESET)
-            return None, None, None
-
-    def receive_messages(self, peer_socket, peer_name, session_key):
-        """Thread function to receive messages from the peer."""
-        while self.running and self.in_session:
-            try:
-                encrypted_message = peer_socket.recv(1024)
-                if not encrypted_message:
-                    print(Fore.RED + f"{peer_name} disconnected." + Fore.RESET)
-                    self.in_session = False
-                    break
-                # Decrypt the message
-                decrypted_message = self.decrypt_session_message(encrypted_message, session_key)
-                if not decrypted_message or decrypted_message == ":q":
-                    print(Fore.RED + f"{peer_name} has ended the chat." + Fore.RESET)
-                    self.in_session = False
-                    break
-                print(Fore.MAGENTA + f"{peer_name}: {decrypted_message}" + Fore.RESET)
-            except ConnectionResetError:
-                print(Fore.RED + f"{peer_name} disconnected abruptly." + Fore.RESET)
-                self.in_session = False
-                break
-            except Exception as e:
-                print(Fore.RED + f"Error receiving message: {e}" + Fore.RESET)
-                self.in_session = False
-                break
-        peer_socket.close()
-
     def send_message(self, message):
         """Send a message to the peer."""
         if not self.peer_socket:
@@ -608,31 +540,6 @@ class ChatClient:
             self.in_session = False
             self.peer_socket.close()
 
-    def encrypt_session_message(self, message, session_key):
-        """Encrypts a message using DES with the provided session key."""
-        # Ensure the key is 8 bytes long (DES uses 8-byte keys)
-        session_key_bytes = session_key.encode('utf-8')[:8]  # Truncate or pad to 8 bytes
-        cipher = DES.new(session_key_bytes, DES.MODE_CBC)
-        padded_message = pad(message.encode('utf-8'), DES.block_size)  # Pad message to block size
-        encrypted_message = cipher.encrypt(padded_message)
-        return cipher.iv + encrypted_message  # Send the IV along with the message for decryption
-
-    def decrypt_session_message(self, encrypted_message, session_key):
-        """Decrypts a message using DES with the provided session key."""
-        try:
-            session_key_bytes = session_key.encode('utf-8')[:8]  # Truncate or pad to 8 bytes
-            iv = encrypted_message[:8]  # Extract the IV from the beginning
-            encrypted_payload = encrypted_message[8:]  # Get the actual encrypted message
-            cipher = DES.new(session_key_bytes, DES.MODE_CBC, iv)  # Use the same IV for decryption
-            decrypted_padded = cipher.decrypt(encrypted_payload)
-            decrypted_message = unpad(decrypted_padded, DES.block_size).decode('utf-8')
-            return decrypted_message
-        except ValueError:
-            print(Fore.RED + "Incorrect decryption." + Fore.RESET)
-            return ""
-        except Exception as e:
-            print(Fore.RED + f"Error during decryption: {e}" + Fore.RESET)
-            return ""
 
     def send_exit(self):
         """Send an exit command to the server and stop the client."""
@@ -688,6 +595,7 @@ class ChatClient:
         except:
             pass
         print(Fore.RED + "Client shut down." + Fore.RESET)
+
 
 if __name__ == "__main__":
     client = ChatClient()

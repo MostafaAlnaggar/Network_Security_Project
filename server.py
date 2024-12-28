@@ -122,7 +122,6 @@ def login_user(collection, username, password, client_cert_pem, client_ip, clien
     return {"status": "success", "message": "Login successful."}
 
 
-
 def handle_client(connstream, collection, connected_clients, lock):
     try:
         # Extract the client's certificate in PEM format
@@ -175,7 +174,8 @@ def handle_client(connstream, collection, connected_clients, lock):
                     if not login_username or not login_password:
                         response = {"status": "error", "message": "Username and password are required for login."}
                     else:
-                        login_response = login_user(collection, login_username, login_password, client_cert_pem, client_ip, client_port)
+                        login_response = login_user(collection, login_username, login_password, client_cert_pem,
+                                                    client_ip, client_port)
                         if login_response['status'] == "success":
                             authenticated = True
                             username = login_username
