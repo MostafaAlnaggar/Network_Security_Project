@@ -1,3 +1,4 @@
+import hashlib
 import ssl
 import json
 import sys
@@ -26,6 +27,7 @@ class ChatClient:
         self.peer_name = ""  # Name of the peer
         self.receive_thread = None  # Thread for receiving messages
         self.session_established = threading.Event()  # Event to signal session establishment
+        self.username = ""
 
     def start(self):
         """Initialize the client connection and start the interaction."""
@@ -98,6 +100,7 @@ class ChatClient:
         password = input("Enter password: ").strip()
         success = self.login_user(username, password)
         if success:
+            self.username = username
             print(Fore.GREEN + "Login successful." + Fore.RESET)
             # Load private key
             try:
@@ -139,7 +142,6 @@ class ChatClient:
                 if user_input == ":q":
                     self.send_message(":q")
                     self.in_session = False
-                    print(Fore.RED + "You have ended the chat." + Fore.RESET)
                 elif user_input:
                     self.send_message(user_input)
             else:
@@ -159,7 +161,7 @@ class ChatClient:
 
     def start_session(self):
         """Initiate a session with another user."""
-        id_A = input("Enter your username: ").strip()
+        id_A = self.username.strip()
         id_B = input("Enter recipient username: ").strip()
         to_A, to_B, client_B_info = self.request_session(id_A, id_B)
         if to_A and to_B and client_B_info:
@@ -267,6 +269,40 @@ class ChatClient:
             print(Fore.RED + f"Error during session request: {e}" + Fore.RESET)
             return None, None, None
 
+    def send_message(self, message):
+        """Send a message to the peer."""
+        if not self.peer_socket:
+            print(Fore.RED + "No active session to send messages." + Fore.RESET)
+            return
+        session_key = self.session_keys.get(self.peer_name)
+        print(
+            Fore.BLUE + f"Attempting to send message to '{self.peer_name}' with session key: '{session_key}'" + Fore.RESET)  # Debugging
+        if not session_key:
+            print(Fore.RED + "Session key not found." + Fore.RESET)
+            return
+        try:
+            # 1. Generate the hash of the message
+            hash_obj = hashlib.sha256(message.encode('utf-8'))
+            message_hash = hash_obj.digest()  # Get the hash as bytes
+
+            # 2. Combine the message and its hash
+            combined_data = message.encode('utf-8') + b"::" + message_hash
+
+            # 3. Encrypt the combined data
+            encrypted_message = self.encrypt_session_message(combined_data.decode('latin1'), session_key)
+
+            # 4. Send the encrypted message
+            self.peer_socket.sendall(encrypted_message)
+
+            if message == ":q":
+                self.in_session = False
+                self.peer_socket.close()
+                print(Fore.RED + "You have ended the chat." + Fore.RESET)
+        except Exception as e:
+            print(Fore.RED + f"Error sending message: {e}" + Fore.RESET)
+            self.in_session = False
+            self.peer_socket.close()
+
     def receive_messages(self, peer_socket, peer_name, session_key):
         """Thread function to receive messages from the peer."""
         while self.running and self.in_session:
@@ -276,19 +312,41 @@ class ChatClient:
                     print(Fore.RED + f"{peer_name} disconnected." + Fore.RESET)
                     self.in_session = False
                     break
-                # Decrypt the message
-                decrypted_message = self.decrypt_session_message(encrypted_message, session_key)
-                if not decrypted_message or decrypted_message == ":q":
+
+                # 1. Decrypt the message
+                decrypted_data = self.decrypt_session_message(encrypted_message, session_key)
+                if not decrypted_data:
                     print(Fore.RED + f"{peer_name} has ended the chat." + Fore.RESET)
+                    print("\nEnter command (session/exit): ")
                     self.in_session = False
                     break
-                print(Fore.MAGENTA + f"{peer_name}: {decrypted_message}" + Fore.RESET)
+
+                # 2. Separate the message and hash
+                try:
+                    message, received_hash = decrypted_data.rsplit("::", 1)
+                    if message == ":q":
+                        print(Fore.RED + f"{peer_name} has ended the chat." + Fore.RESET)
+                        print("\nEnter command (session/exit): ", end="")
+                        self.in_session = False
+                        break
+                    received_hash_bytes = bytes(received_hash, encoding='latin1')
+                except ValueError:
+                    print(Fore.RED + "Malformed message received." + Fore.RESET)
+                    continue
+
+                # 3. Generate a new hash of the message
+                computed_hash = hashlib.sha256(message.encode('utf-8')).digest()
+
+                # 4. Verify integrity
+                if received_hash_bytes != computed_hash:
+                    print(Fore.RED + "Message integrity verification failed!" + Fore.RESET)
+                else:
+                    print(Fore.MAGENTA + f"{peer_name}: {message}" + Fore.RESET)
             except ConnectionResetError:
                 print(Fore.RED + f"{peer_name} disconnected abruptly." + Fore.RESET)
                 self.in_session = False
                 break
             except Exception as e:
-                print(Fore.RED + f"Error receiving message: {e}" + Fore.RESET)
                 self.in_session = False
                 break
         peer_socket.close()
@@ -441,7 +499,7 @@ class ChatClient:
 
                     try:
                         # Step 4: Decrypt the message using the private key
-                        decrypted_message = self.decrypt_message_by_public(self.private_key_pem, full_message.decode('utf-8'))
+                        decrypted_message = self.decrypt_message_by_private(self.private_key_pem, full_message.decode('utf-8'))
                         print(Fore.CYAN + f"Decrypted message from {addr}: {decrypted_message}" + Fore.RESET)
 
                         # Step 5: Parse the decrypted message to extract the session key and id_A
@@ -518,39 +576,13 @@ class ChatClient:
                 break
         sock.close()
 
-    def send_message(self, message):
-        """Send a message to the peer."""
-        if not self.peer_socket:
-            print(Fore.RED + "No active session to send messages." + Fore.RESET)
-            return
-        session_key = self.session_keys.get(self.peer_name)
-        print(Fore.BLUE + f"Attempting to send message to '{self.peer_name}' with session key: '{session_key}'" + Fore.RESET)  # Debugging
-        if not session_key:
-            print(Fore.RED + "Session key not found." + Fore.RESET)
-            return
-        try:
-            encrypted_message = self.encrypt_session_message(message, session_key)
-            self.peer_socket.sendall(encrypted_message)
-            if message == ":q":
-                self.in_session = False
-                self.peer_socket.close()
-                print(Fore.RED + "You have ended the chat." + Fore.RESET)
-        except Exception as e:
-            print(Fore.RED + f"Error sending message: {e}" + Fore.RESET)
-            self.in_session = False
-            self.peer_socket.close()
-
 
     def send_exit(self):
         """Send an exit command to the server and stop the client."""
         message = {"command": "EXIT", "payload": {}}
         try:
             self.send_command(self.conn, message)
-            response = self.receive_response()
-            if response and response.get('status', '').lower() == 'success':
-                print(Fore.GREEN + "Disconnecting from the server." + Fore.RESET)
-            else:
-                print(Fore.RED + f"Server: {response.get('message', 'Failed to exit gracefully.')}" + Fore.RESET)
+            print(Fore.GREEN + "Disconnecting from the server." + Fore.RESET)
         except Exception as e:
             print(Fore.RED + f"Error during exit: {e}" + Fore.RESET)
         self.running = False
@@ -563,7 +595,6 @@ class ChatClient:
         # Wait for receiving thread to finish
         if self.receive_thread and self.receive_thread.is_alive():
             self.receive_thread.join()
-        print(Fore.RED + "Client shut down." + Fore.RESET)
 
     def send_command(self, conn, message):
         """Sends a JSON-encoded command to the server."""
