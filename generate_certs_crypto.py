@@ -4,6 +4,30 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 import datetime
 import ipaddress
+import os
+import shutil
+from datetime import datetime
+
+
+# Define backup directory
+BACKUP_DIR = "key_backups"
+
+
+# Ensure backup directory exists
+if not os.path.exists(BACKUP_DIR):
+    os.makedirs(BACKUP_DIR)
+
+# Backs up existing files to the backup directory with a timestamp.
+def backup_existing_files(filenames):
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    for filename in filenames:
+        if os.path.exists(filename):
+            # Construct backup filename with timestamp
+            basename = os.path.basename(filename)
+            backup_filename = f"{basename}.{timestamp}.bak"
+            backup_path = os.path.join(BACKUP_DIR, backup_filename)
+            shutil.move(filename, backup_path)
+            print(f"Backed up {filename} to {backup_path}.")
 
 def generate_private_key(key_size=2048):
     return rsa.generate_private_key(
@@ -38,12 +62,12 @@ def generate_ca():
     
     # Generate CA's self-signed certificate
     subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
-        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "California"),
-        x509.NameAttribute(NameOID.LOCALITY_NAME, "San Francisco"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "MyCompany"),
-        x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "IT"),
-        x509.NameAttribute(NameOID.COMMON_NAME, "MyCompany CA"),
+        x509.NameAttribute(NameOID.COUNTRY_NAME, "EG"),
+        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "Cairo"),
+        x509.NameAttribute(NameOID.LOCALITY_NAME, "NewCairo"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "ASU"),
+        x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "CESS"),
+        x509.NameAttribute(NameOID.COMMON_NAME, "NetworkSec"),
     ])
     
     ca_cert = x509.CertificateBuilder().subject_name(
@@ -57,8 +81,8 @@ def generate_ca():
     ).not_valid_before(
         datetime.datetime.utcnow()
     ).not_valid_after(
-        # CA certificate valid for 10 years
-        datetime.datetime.utcnow() + datetime.timedelta(days=3650)
+        # CA certificate valid for 2 years
+        datetime.datetime.utcnow() + datetime.timedelta(days=730)
     ).add_extension(
         x509.BasicConstraints(ca=True, path_length=None),
         critical=True,
@@ -76,11 +100,11 @@ def generate_certificate(subject_common_name, filename_prefix, ca_cert, ca_key, 
     
     # Generate CSR
     subject = x509.Name([
-        x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
-        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "California"),
-        x509.NameAttribute(NameOID.LOCALITY_NAME, "San Francisco"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "MyCompany"),
-        x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "IT"),
+        x509.NameAttribute(NameOID.COUNTRY_NAME, "ُEG"),
+        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "Cairo"),
+        x509.NameAttribute(NameOID.LOCALITY_NAME, "NewCairo"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "ASU"),
+        x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "CESS"),
         x509.NameAttribute(NameOID.COMMON_NAME, subject_common_name),
     ])
     
@@ -129,6 +153,13 @@ def generate_certificate(subject_common_name, filename_prefix, ca_cert, ca_key, 
     print(get_public_key(key))
 
 def main():
+
+    # Define the files to back up before generating new ones
+    files_to_backup = ["ca.key", "ca.pem", "server.key", "server.pem", "client.key", "client.pem"]
+    
+    # Perform backup
+    backup_existing_files(files_to_backup)
+
     # Generate CA
     generate_ca()
     
