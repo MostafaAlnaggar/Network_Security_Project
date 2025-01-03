@@ -10,6 +10,7 @@ import socket
 from Crypto.Cipher import DES
 from Crypto.Util.Padding import pad, unpad
 from colorama import init, Fore
+import os
 
 # Initialize colorama
 init(autoreset=True)
@@ -28,15 +29,30 @@ class ChatClient:
         self.receive_thread = None  # Thread for receiving messages
         self.session_established = threading.Event()  # Event to signal session establishment
         self.username = ""
+        self.cert_file = "client.pem"
+        self.key_file = "client.key"
 
     def start(self):
         """Initialize the client connection and start the interaction."""
-        # Configure SSL context for the client
+
+        if not self.conn:
+            # Initialize SSL connection with current cert and key
+            try:
+                self.initialize_ssl_connection(cert_file=self.cert_file, key_file=self.key_file)
+                self.show_main_menu()
+            finally:
+                self.shutdown()
+
+       
+
+    def initialize_ssl_connection(self, cert_file, key_file):
+        """Initialize SSL connection with specified certificate and key."""
         context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile='ca.pem')
         try:
-            context.load_cert_chain(certfile='client.pem', keyfile='client.key')  # Client's cert and key
+            context.load_cert_chain(certfile=cert_file, keyfile=key_file)  # Load specified cert and key
         except Exception as e:
-            print(Fore.RED + f"Error loading certificates: {e}")
+            print(Fore.RED + f"Error loading certificates ({cert_file}, {key_file}): {e}" + Fore.RESET)
+            self.shutdown()
             sys.exit(1)
 
         # Enforce TLS versions
@@ -55,59 +71,93 @@ class ChatClient:
             self.conn.connect((self.server_host, self.server_port))
             print(Fore.GREEN + "Connected to server with mTLS" + Fore.RESET)
 
-            self.show_main_menu()
-
         except ssl.SSLError as e:
             print(Fore.RED + f"SSL error: {e}" + Fore.RESET)
+            sys.exit(1)
         except ConnectionRefusedError:
             print(Fore.RED + "Connection refused. Ensure the server is running." + Fore.RESET)
+            sys.exit(1)
         except Exception as e:
             print(Fore.RED + f"An error occurred: {e}" + Fore.RESET)
-        finally:
-            self.shutdown()
+            sys.exit(1)
 
     def show_main_menu(self):
         """Display the main menu and handle user choices."""
         while self.running:
-            print("\nChoose an option:")
-            print("1. Register")
-            print("2. Login")
-            print("3. Exit")
+            print(Fore.LIGHTBLACK_EX + "\nChoose an option:")
+            print(Fore.LIGHTBLACK_EX +"1. Register")
+            print(Fore.LIGHTBLACK_EX +"2. Login")
+            print(Fore.LIGHTBLACK_EX + "3. Exit"+ Fore.RESET)
+            try:
+                choice =  input( Fore.LIGHTMAGENTA_EX + "Enter choice (1/2/3): " + Fore.RESET).strip() 
 
-            choice = input("Enter choice (1/2/3): ").strip()
-
-            if choice == '1':
-                self.handle_register()
-            elif choice == '2':
-                if self.handle_login():
-                    # Start the input loop after successful login
-                    self.input_loop()
-            elif choice == '3':
-                self.send_exit()
-                break
-            else:
-                print(Fore.YELLOW + "Invalid choice. Please enter 1, 2, or 3." + Fore.RESET)
+                if choice == '1':
+                    self.handle_register()
+                elif choice == '2':
+                    if self.handle_login():
+                        # Start the input loop after successful login
+                        self.input_loop()
+                elif choice == '3':
+                    self.send_exit()
+                    break
+                else:
+                    print(Fore.YELLOW + "Invalid choice. Please enter 1, 2, or 3." + Fore.RESET)
+            except KeyboardInterrupt:
+                 self.send_exit
+                 return
 
     def handle_register(self):
         """Handle user registration."""
-        username = input("Enter desired username: ").strip()
-        password = input("Enter desired password: ").strip()
+        try:
+            username = input( Fore.LIGHTYELLOW_EX + "Enter desired username: " + Fore.RESET).strip()
+            password = input( Fore.LIGHTYELLOW_EX + "Enter desired password: " + Fore.RESET).strip()
+        except KeyboardInterrupt:
+            self.send_exit
+            return
         self.register_user(username, password)
 
     def handle_login(self):
         """Handle user login."""
-        username = input("Enter username: ").strip()
-        password = input("Enter password: ").strip()
+        try:
+            username = input( Fore.LIGHTYELLOW_EX + "Enter username: " + Fore.RESET).strip()
+            password = input( Fore.LIGHTYELLOW_EX + "Enter password: " + Fore.RESET).strip()
+        except KeyboardInterrupt:
+            self.send_exit
+            return
+    
+        # Check if certificate and key files exist for the username
+        cert_file = f"{username}.pem"
+        key_file = f"{username}.key"
+        if not os.path.exists(cert_file) or not os.path.exists(key_file):
+            print(Fore.RED + "Certificate or key file not found for this user. Please register first." + Fore.RESET)
+            return False
+
+        # Determine if current cert and key match the username
+        current_cert = os.path.abspath(self.cert_file)
+        desired_cert = os.path.abspath(cert_file)
+        if os.path.samefile(current_cert, desired_cert) and os.path.samefile(os.path.abspath(self.key_file), os.path.abspath(key_file)):
+            pass
+            # No need to reconnect
+        else:
+            # Reinitialize SSL connection with user-specific cert and key before login
+            if self.conn:
+                self.conn.close()
+                self.conn = None
+            self.cert_file = cert_file
+            self.key_file = key_file
+            self.initialize_ssl_connection(cert_file=self.cert_file, key_file=self.key_file)
+            print(Fore.GREEN + "Reconnected to server with your credentials." + Fore.RESET)
         success = self.login_user(username, password)
+
         if success:
             self.username = username
             print(Fore.GREEN + "Login successful." + Fore.RESET)
             # Load private key
             try:
-                with open("client.key", "r") as f:
+                with open(f"{username}.key", "r") as f:
                     self.private_key_pem = f.read()
             except FileNotFoundError:
-                print(Fore.RED + "Private key file 'client.key' not found." + Fore.RESET)
+                print(Fore.RED + "Private key file '{username}.key' not found." + Fore.RESET)
                 self.running = False
                 return False
             return True
@@ -120,7 +170,7 @@ class ChatClient:
         while self.running:
             if not self.in_session:
                 # Command mode
-                prompt = "\nEnter command (session/exit): "
+                prompt = Fore.LIGHTMAGENTA_EX + "\nEnter command (session/exit): "  + Fore.RESET
             else:
                 # Messaging mode
                 prompt = Fore.LIGHTBLUE_EX + "You: " + Fore.RESET
@@ -162,7 +212,20 @@ class ChatClient:
     def start_session(self):
         """Initiate a session with another user."""
         id_A = self.username.strip()
-        id_B = input("Enter recipient username: ").strip()
+        try:
+            id_B = input(Fore.LIGHTYELLOW_EX + "Enter recipient username: " + Fore.RESET).strip()
+        except KeyboardInterrupt:
+            self.send_exit
+            return
+        if not id_B:
+            print(Fore.RED + "Recipient username cannot be empty." + Fore.RESET)
+            return
+
+        # Check if trying to start a session with oneself
+        if id_A == id_B:
+            print(Fore.RED + "You cannot start a session with yourself." + Fore.RESET)
+            return
+            
         to_A, to_B, client_B_info = self.request_session(id_A, id_B)
         if to_A and to_B and client_B_info:
             # Decrypt message1 with own private key to get session key
@@ -204,29 +267,43 @@ class ChatClient:
             peer_socket.sendall(header.encode('utf-8') + encrypted_session_key)
             print(Fore.GREEN + f"Sent session key message to Client B at {client_B_ip}:{client_B_port}." + Fore.RESET)
 
-            # Step 2: Wait for the encrypted challenge from Client B
-            encrypted_challenge = peer_socket.recv(1024)
-            if not encrypted_challenge:
+             # Step 2: Receive response from Client B
+            response = peer_socket.recv(1024)
+            if not response:
                 print(Fore.RED + f"Connection closed by {client_B_ip}:{client_B_port}" + Fore.RESET)
                 peer_socket.close()
                 return
 
-            challenge = self.decrypt_session_message(encrypted_challenge, session_key)
+            # Attempt to decode the response as UTF-8 to check for error messages
+            try:
+                decoded_response = response.decode('utf-8')
+                if decoded_response.startswith("Error:"):
+                    # Received an error message indicating Client B is busy
+                    print(Fore.RED + f"Session request rejected by {id_B}: {decoded_response}" + Fore.RESET)
+                    peer_socket.close()
+                    return
+            except UnicodeDecodeError:
+                # Response is not a UTF-8 string, proceed to decrypt as challenge
+                pass
+
+
+            # Step 3: Decrypt the encrypted challenge from Client B
+            challenge = self.decrypt_session_message(response, session_key)
             print(Fore.CYAN + f"Received encrypted challenge from Client B: {challenge}" + Fore.RESET)
 
-            # Step 3: Solve the challenge
+            # Step 4: Solve the challenge
             try:
                 solution = str(eval(challenge))
             except Exception as e:
                 print(Fore.RED + f"Error solving the challenge: {e}" + Fore.RESET)
                 solution = "Error"
 
-            # Step 4: Encrypt the solution and send it back
+            # Step 5: Encrypt the solution and send it back
             encrypted_solution = self.encrypt_session_message(solution, session_key)
             peer_socket.sendall(encrypted_solution)
             print(Fore.GREEN + f"Sent encrypted solution to Client B: {solution}" + Fore.RESET)
 
-            # Step 5: Wait for acknowledgment from Client B
+            # Step 6: Wait for acknowledgment from Client B
             encrypted_ack = peer_socket.recv(1024)
             acknowledgment = self.decrypt_session_message(encrypted_ack, session_key)
             print(Fore.CYAN + f"Received acknowledgment from Client B: {acknowledgment}" + Fore.RESET)
@@ -276,7 +353,7 @@ class ChatClient:
             return
         session_key = self.session_keys.get(self.peer_name)
         print(
-            Fore.BLUE + f"Attempting to send message to '{self.peer_name}' with session key: '{session_key}'" + Fore.RESET)  # Debugging
+            Fore.YELLOW + f"Attempting to send message to '{self.peer_name}' with session key: '{session_key}'" + Fore.RESET)  # Debugging
         if not session_key:
             print(Fore.RED + "Session key not found." + Fore.RESET)
             return
@@ -317,7 +394,7 @@ class ChatClient:
                 decrypted_data = self.decrypt_session_message(encrypted_message, session_key)
                 if not decrypted_data:
                     print(Fore.RED + f"{peer_name} has ended the chat." + Fore.RESET)
-                    print("\nEnter command (session/exit): ")
+                    print(Fore.LIGHTMAGENTA_EX +"\nEnter command (session/exit): "  + Fore.RESET)
                     self.in_session = False
                     break
 
@@ -326,7 +403,7 @@ class ChatClient:
                     message, received_hash = decrypted_data.rsplit("::", 1)
                     if message == ":q":
                         print(Fore.RED + f"{peer_name} has ended the chat." + Fore.RESET)
-                        print("\nEnter command (session/exit): ", end="")
+                        print(Fore.LIGHTMAGENTA_EX +"\nEnter command (session/exit): "  + Fore.RESET)
                         self.in_session = False
                         break
                     received_hash_bytes = bytes(received_hash, encoding='latin1')
@@ -341,7 +418,7 @@ class ChatClient:
                 if received_hash_bytes != computed_hash:
                     print(Fore.RED + "Message integrity verification failed!" + Fore.RESET)
                 else:
-                    print(Fore.MAGENTA + f"{peer_name}: {message}" + Fore.RESET)
+                    print(Fore.LIGHTCYAN_EX + f"{peer_name}: {message}" + Fore.RESET)
             except ConnectionResetError:
                 print(Fore.RED + f"{peer_name} disconnected abruptly." + Fore.RESET)
                 self.in_session = False
@@ -409,6 +486,12 @@ class ChatClient:
             response = self.receive_response()
             if response and response.get('status', '').lower() == 'success':
                 print(Fore.GREEN + f"Server: {response.get('message')}" + Fore.RESET)
+                self.cert_file = f"{username}.pem"
+                self.key_file = f"{username}.key"
+                if self.conn:
+                    self.conn.close()
+                    self.conn = None
+                self.initialize_ssl_connection(cert_file=self.cert_file, key_file=self.key_file)
             else:
                 print(Fore.RED + f"Server: {response.get('message', 'Registration failed.')}" + Fore.RESET)
         except Exception as e:
@@ -482,6 +565,20 @@ class ChatClient:
         while self.running:
             try:
                 conn, addr = sock.accept()  # Accept incoming connections
+
+                # **Check if already in a session**
+                if self.in_session:
+                    # **Send an error message indicating that a session is already active**
+                    error_message = "Error: Already in a session."
+                    try:
+                        conn.sendall(error_message.encode('utf-8'))
+                        print(Fore.RED + f"Rejected session from {addr} as already in a session." + Fore.RESET)
+                    except Exception as e:
+                        print(Fore.RED + f"Error sending rejection message to {addr}: {e}" + Fore.RESET)
+                    finally:
+                        conn.close()
+                    continue  # Skip processing this connection
+
                 print(Fore.GREEN + f"Connection established with {addr}" + Fore.RESET)
 
                 # Step 1: Receive the fixed-size header

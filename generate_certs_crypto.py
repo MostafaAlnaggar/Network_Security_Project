@@ -6,7 +6,6 @@ import datetime
 import ipaddress
 import os
 import shutil
-from datetime import datetime
 
 
 # Define backup directory
@@ -19,7 +18,7 @@ if not os.path.exists(BACKUP_DIR):
 
 # Backs up existing files to the backup directory with a timestamp.
 def backup_existing_files(filenames):
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
     for filename in filenames:
         if os.path.exists(filename):
             # Construct backup filename with timestamp
@@ -62,12 +61,12 @@ def generate_ca():
     
     # Generate CA's self-signed certificate
     subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.COUNTRY_NAME, "EG"),
-        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "Cairo"),
-        x509.NameAttribute(NameOID.LOCALITY_NAME, "NewCairo"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "ASU"),
-        x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "CESS"),
-        x509.NameAttribute(NameOID.COMMON_NAME, "NetworkSec"),
+        x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "California"),
+        x509.NameAttribute(NameOID.LOCALITY_NAME, "San Francisco"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "MyCompany"),
+        x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "IT"),
+        x509.NameAttribute(NameOID.COMMON_NAME, "MyCompany CA"),
     ])
     
     ca_cert = x509.CertificateBuilder().subject_name(
@@ -81,8 +80,8 @@ def generate_ca():
     ).not_valid_before(
         datetime.datetime.utcnow()
     ).not_valid_after(
-        # CA certificate valid for 2 years
-        datetime.datetime.utcnow() + datetime.timedelta(days=730)
+        # CA certificate valid for 10 years
+        datetime.datetime.utcnow() + datetime.timedelta(days=3650)
     ).add_extension(
         x509.BasicConstraints(ca=True, path_length=None),
         critical=True,
@@ -100,11 +99,11 @@ def generate_certificate(subject_common_name, filename_prefix, ca_cert, ca_key, 
     
     # Generate CSR
     subject = x509.Name([
-        x509.NameAttribute(NameOID.COUNTRY_NAME, "ُEG"),
-        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "Cairo"),
-        x509.NameAttribute(NameOID.LOCALITY_NAME, "NewCairo"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "ASU"),
-        x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "CESS"),
+        x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "California"),
+        x509.NameAttribute(NameOID.LOCALITY_NAME, "San Francisco"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "MyCompany"),
+        x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "IT"),
         x509.NameAttribute(NameOID.COMMON_NAME, subject_common_name),
     ])
     
@@ -134,15 +133,23 @@ def generate_certificate(subject_common_name, filename_prefix, ca_cert, ca_key, 
         critical=True,
     )
     
+    # Add SANs
+    san_list = []
     if is_server:
-        # Add Subject Alternative Name for server
-        cert_builder = cert_builder.add_extension(
-            x509.SubjectAlternativeName([
-                x509.DNSName("localhost"),
-                x509.IPAddress(ipaddress.IPv4Address("127.0.0.1"))
-            ]),
-            critical=False
-        )
+        # For server certificates, include DNS and IP
+        san_list.extend([
+            x509.DNSName("localhost"),
+            x509.IPAddress(ipaddress.IPv4Address("127.0.0.1"))
+        ])
+    else:
+        # For client certificates, include only DNS or IP as needed
+        # Here, we include IP for local testing
+        san_list.append(x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")))
+    
+    cert_builder = cert_builder.add_extension(
+        x509.SubjectAlternativeName(san_list),
+        critical=False
+    )
     
     cert = cert_builder.sign(private_key=ca_key, algorithm=hashes.SHA256())
     
@@ -151,6 +158,7 @@ def generate_certificate(subject_common_name, filename_prefix, ca_cert, ca_key, 
     print(f"{filename_prefix.capitalize()} certificate and key generated.")
     print(f"{filename_prefix.capitalize()} Public Key:")
     print(get_public_key(key))
+    
 
 def main():
 

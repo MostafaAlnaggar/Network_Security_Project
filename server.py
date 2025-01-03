@@ -10,6 +10,12 @@ from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding  # Corrected import
 from cryptography.hazmat.primitives import hashes
+import generate_certs_crypto
+from colorama import init, Fore
+
+
+# Initialize colorama
+init(autoreset=True)
 
 # MongoDB Configuration
 MONGO_URI = "mongodb://localhost:27017/"
@@ -28,7 +34,7 @@ def connect_db():
         collection = db[COLLECTION_NAME]
         return collection
     except Exception as e:
-        print(f"Failed to connect to MongoDB: {e}")
+        print(Fore.RED + f"Failed to connect to MongoDB: {e}" + Fore.RESET)
         sys.exit(1)
 
 
@@ -59,7 +65,7 @@ def get_public_key_from_cert(cert_pem):
     return pem_public_key.decode('utf-8')
 
 
-def register_user(collection, username, password, client_cert_pem):
+def register_user(collection, username, password):
     # Check if username already exists
     if collection.find_one({"username": username}):
         return {"status": "error", "message": "Username already exists."}
@@ -67,8 +73,21 @@ def register_user(collection, username, password, client_cert_pem):
     # Hash the password with salt
     hashed = hash_password(password)
 
+    # Load CA certificate and key
+    with open("ca.pem", "rb") as f:
+        ca_cert = x509.load_pem_x509_certificate(f.read())
+    
+    with open("ca.key", "rb") as f:
+        ca_key = serialization.load_pem_private_key(f.read(), password=None)
+
+    generate_certs_crypto.generate_certificate(username, username, ca_cert, ca_key, is_server=False)
+
+        # Read the generated certificate from the file
+    cert_filename = f"{username}.pem"
+    with open(cert_filename, "rb") as f:
+        cert_pem = f.read()
     # Extract public key from client certificate
-    public_key = get_public_key_from_cert(client_cert_pem)
+    public_key = get_public_key_from_cert(cert_pem.decode('utf-8'))
 
     # Store user with hashed password, salt, and public key
     user = {
@@ -86,11 +105,15 @@ def register_user(collection, username, password, client_cert_pem):
         return {"status": "error", "message": f"Registration failed: {e}"}
 
 
-def login_user(collection, username, password, client_cert_pem, client_ip, client_port):
+def login_user(collection, username, password, client_ip, client_port):
     # Find user by username
     user = collection.find_one({"username": username})
     if not user:
         return {"status": "error", "message": "Invalid username or password."}
+    
+    # Check if user is already logged in
+    if user.get('logged_in', False):
+        return {"status": "error", "message": "User already logged in."}
 
     # Retrieve salt and hash the input password
     salt = user.get('salt')
@@ -102,34 +125,21 @@ def login_user(collection, username, password, client_cert_pem, client_ip, clien
     # Compare the hashed input with stored hash
     if hashed_input['hash'] != user.get('password_hash'):
         return {"status": "error", "message": "Invalid username or password."}
-
-    # Extract public key from client certificate
-    public_key = get_public_key_from_cert(client_cert_pem)
-
-    # Verify client public key matches the stored public key
-    if public_key != user.get("public_key"):
-        return {"status": "error", "message": "Client certificate does not match the registered user."}
-
+    
     # Update database with client IP and port
     try:
         collection.update_one(
             {"username": username},
-            {"$set": {"client_ip": client_ip, "client_port": client_port}}
+            {"$set": {"client_ip": client_ip, "client_port": client_port, "logged_in": True}}
         )
     except Exception as e:
-        return {"status": "error", "message": f"Failed to update client IP and port: {e}"}
+        return {"status": "error", "message": f"Failed to update client IP, port, and login status:: {e}"}
 
     return {"status": "success", "message": "Login successful."}
 
 
 def handle_client(connstream, collection, connected_clients, lock):
     try:
-        # Extract the client's certificate in PEM format
-        client_cert = connstream.getpeercert(binary_form=True)
-        client_cert_pem = ssl.DER_cert_to_PEM_cert(client_cert)
-
-        # Extract public key from certificate
-        client_public_key = get_public_key_from_cert(client_cert_pem)
 
         # Initialize authentication state
         authenticated = False
@@ -161,7 +171,7 @@ def handle_client(connstream, collection, connected_clients, lock):
                         response = {"status": "error",
                                     "message": "Username and password are required for registration."}
                     else:
-                        reg_response = register_user(collection, reg_username, reg_password, client_cert_pem)
+                        reg_response = register_user(collection, reg_username, reg_password);
                         response = reg_response
                     connstream.sendall(json.dumps(response).encode('utf-8'))
 
@@ -174,7 +184,7 @@ def handle_client(connstream, collection, connected_clients, lock):
                     if not login_username or not login_password:
                         response = {"status": "error", "message": "Username and password are required for login."}
                     else:
-                        login_response = login_user(collection, login_username, login_password, client_cert_pem,
+                        login_response = login_user(collection, login_username, login_password,
                                                     client_ip, client_port)
                         if login_response['status'] == "success":
                             authenticated = True
@@ -189,16 +199,7 @@ def handle_client(connstream, collection, connected_clients, lock):
                     connstream.sendall(json.dumps(response).encode('utf-8'))
 
             else:
-                # Handle authenticated commands
-                if command == "REGISTER":
-                    response = {"status": "error", "message": "Already logged in."}
-                    connstream.sendall(json.dumps(response).encode('utf-8'))
-
-                elif command == "LOGIN":
-                    response = {"status": "error", "message": "Already logged in."}
-                    connstream.sendall(json.dumps(response).encode('utf-8'))
-
-                elif command == "REQUEST_SESSION":
+                if command == "REQUEST_SESSION":
                     # Handle session request
                     id_A = payload.get("id_A")
                     id_B = payload.get("id_B")
@@ -208,7 +209,7 @@ def handle_client(connstream, collection, connected_clients, lock):
                         user_A = collection.find_one({"username": id_A, "key_status": "active"})
                         user_B = collection.find_one({"username": id_B, "key_status": "active"})
                         if not user_A or not user_B:
-                            response = {"status": "error", "message": "One or both users not found or key revoked."}
+                            response = {"status": "error", "message": "User not found"}
                         else:
                             # Check if user_B has IP and port stored
                             client_ip = user_B.get("client_ip")
@@ -263,20 +264,21 @@ def handle_client(connstream, collection, connected_clients, lock):
                     connstream.sendall(json.dumps(response).encode('utf-8'))
 
     except ssl.SSLError as e:
-        print(f"SSL error: {e}")
+        print( Fore.RED +f"SSL error: {e}" + Fore.RESET)
     except Exception as e:
-        print(f"An error occurred while handling client '{username}': {e}")
+        print(Fore.RED + f"An error occurred while handling client '{username}': {e}" + Fore.RESET)
     finally:
         if authenticated and username:
             with lock:
                 if username in connected_clients:
                     del connected_clients[username]
+                    collection.update_one({"username": username}, {"$set": {"logged_in": False}})
         try:
             connstream.shutdown(socket.SHUT_RDWR)
         except:
             pass
         connstream.close()
-        print(f"Connection with user '{username}' closed.")
+        print(Fore.GREEN + f"Connection with user '{username}' closed." + Fore.RESET)
 
 
 def start_server():
@@ -288,6 +290,7 @@ def start_server():
 
     # Configure SSL context for the server
     context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    #context.verify_mode = ssl.CERT_NONE
     context.verify_mode = ssl.CERT_REQUIRED  # Require client certificate
     context.load_cert_chain(certfile='server.pem', keyfile='server.key')
     context.load_verify_locations(cafile='ca.pem')  # CA certificate to verify client
@@ -301,8 +304,8 @@ def start_server():
     server_socket.bind((host, port))
     server_socket.listen(5)  # Listen for up to 5 connections
 
-    print(f"Server started on {host}:{port}")
-    print("Waiting for a connection...")
+    print(Fore.GREEN + f"Server started on {host}:{port}" + Fore.RESET)
+    print(Fore.YELLOW + "Waiting for a connection..." + Fore.RESET)
 
     connected_clients = {}  # Dictionary to track active clients
     connected_clients_lock = threading.Lock()  # Thread lock for connected_clients
@@ -310,11 +313,11 @@ def start_server():
     while True:
         try:
             newsocket, fromaddr = server_socket.accept()
-            print(f"Connection established with {fromaddr}")
+            print(Fore.GREEN + f"Connection established with {fromaddr}" + Fore.RESET)
 
             # Wrap the socket with SSL
             connstream = context.wrap_socket(newsocket, server_side=True)
-            print("SSL established.")
+            print(Fore.GREEN + "SSL established." + Fore.RESET)
 
             # Handle client in a separate thread
             client_thread = threading.Thread(target=handle_client,
@@ -322,15 +325,15 @@ def start_server():
             client_thread.start()
 
         except KeyboardInterrupt:
-            print("\nServer is shutting down.")
+            print(Fore.RED +  "\nServer is shutting down." + Fore.RESET)
             break
         except ssl.SSLError as e:
-            print(f"SSL error during connection: {e}")
+            print(Fore.RED + f"SSL error during connection: {e}" + Fore.RESET)
         except Exception as e:
-            print(f"An error occurred: {e}")
+            print(Fore.RED + f"An error occurred: {e}" + Fore.RESET)
 
     server_socket.close()
-    print("Server shut down.")
+    print(Fore.RED + "Server shut down." + Fore.RESET)
 
 
 if __name__ == "__main__":
